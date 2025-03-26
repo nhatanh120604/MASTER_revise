@@ -33,11 +33,15 @@ if universe == 'csi300':
 elif universe == 'csi800':
     beta = 2
 
-n_epoch = 1
+n_epoch = 20
 lr = 1e-5
 GPU = 0
-train_stop_loss_thred = 0.95
 
+# Option 1: Lower the threshold to continue training
+train_stop_loss_thred = 0.1  # Set to a lower value that will require more training
+
+# OR Option 2: Disable early stopping by setting to a very small value
+# train_stop_loss_thred = 0.00001
 
 ic = []
 icir = []
@@ -46,7 +50,7 @@ ricir = []
 
 # Training
 ######################################################################################
-'''for seed in [0, 1, 2, 3, 4]:
+for seed in [0]:
     model = MASTERModel(
         d_feat = d_feat, d_model = d_model, t_nhead = t_nhead, s_nhead = s_nhead, T_dropout_rate=dropout, S_dropout_rate=dropout,
         beta=beta, gate_input_end_index=gate_input_end_index, gate_input_start_index=gate_input_start_index,
@@ -61,40 +65,45 @@ ricir = []
     print("Model Trained.")
 
     # Test
-    predictions, metrics = model.predict(dl_test)
-    
+    result = model.predict(dl_test)
+    if isinstance(result, tuple) and len(result) == 3:
+        predictions, metrics, uncertainty = result
+    else:
+        predictions, metrics = result
+
     running_time = time.time()-start
-    
+
     print('Seed: {:d} time cost : {:.2f} sec'.format(seed, running_time))
     print(metrics)
 
     ic.append(metrics['IC'])
     icir.append(metrics['ICIR'])
     ric.append(metrics['RIC'])
-    ricir.append(metrics['RICIR'])'''
+    ricir.append(metrics['RICIR'])
 ######################################################################################
 
 # Load and Test
 ######################################################################################
-for seed in [0]:
-    param_path = f'model\{universe}_{prefix}_{seed}.pkl'
+# for seed in [0]:
+#     param_path = f'model\{universe}_{prefix}_{seed}.pkl'
 
-    print(f'Model Loaded from {param_path}')
-    model = MASTERModel(
-            d_feat = d_feat, d_model = d_model, t_nhead = t_nhead, s_nhead = s_nhead, T_dropout_rate=dropout, S_dropout_rate=dropout,
-            beta=beta, gate_input_end_index=gate_input_end_index, gate_input_start_index=gate_input_start_index,
-            n_epochs=n_epoch, lr = lr, GPU = GPU, seed = seed, train_stop_loss_thred = train_stop_loss_thred,
-            save_path='model/', save_prefix=universe
-        )
-    model.load_param(param_path)
-    predictions, metrics = model.predict(dl_test)
-    print(metrics)
+#     print(f'Model Loaded from {param_path}')
+#     model = MASTERModel(
+#             d_feat = d_feat, d_model = d_model, t_nhead = t_nhead, s_nhead = s_nhead, T_dropout_rate=dropout, S_dropout_rate=dropout,
+#             beta=beta, gate_input_end_index=gate_input_end_index, gate_input_start_index=gate_input_start_index,
+#             n_epochs=n_epoch, lr = lr, GPU = GPU, seed = seed, train_stop_loss_thred = train_stop_loss_thred,
+#             save_path='model/', save_prefix=universe
+#         )
+#     model.load_param(param_path)
+#     model.fitted = 1
+#     predictions, metrics = model.predict(dl_test)
+#     print(metrics)
 
-    ic.append(metrics['IC'])
-    icir.append(metrics['ICIR'])
-    ric.append(metrics['RIC'])
-    ricir.append(metrics['RICIR'])
-    
+#     ic.append(metrics['IC'])
+#     icir.append(metrics['ICIR'])
+#     ric.append(metrics['RIC'])
+#     ricir.append(metrics['RICIR'])
+
 ######################################################################################
 
 print("IC: {:.4f} pm {:.4f}".format(np.mean(ic), np.std(ic)))

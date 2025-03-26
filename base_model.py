@@ -19,7 +19,7 @@ def zscore(x):
 def drop_extreme(x):
     sorted_tensor, indices = x.sort()
     N = x.shape[0]
-    percent_2_5 = int(0.025*N)  
+    percent_2_5 = int(0.025*N)
     # Exclude top 2.5% and bottom 2.5% values
     filtered_indices = indices[percent_2_5:-percent_2_5]
     mask = torch.zeros_like(x, device=x.device, dtype=torch.bool)
@@ -84,9 +84,41 @@ class SequenceModel():
         self.model.to(self.device)
 
     def loss_fn(self, pred, label):
+        """
+        Loss function for model training
+
+        Args:
+            pred: model prediction, can be a single tensor or a tuple of (mean_pred, log_var)
+            label: label value
+        """
         mask = ~torch.isnan(label)
-        loss = (pred[mask]-label[mask])**2
-        return torch.mean(loss)
+
+        # Check if pred is a tuple (mean prediction and log variance)
+        if isinstance(pred, tuple) and len(pred) == 2:
+            # Using Gaussian Negative Log Likelihood loss
+            from loss import GaussianNLLLoss
+            criterion = GaussianNLLLoss()
+            mean_pred, log_var = pred
+
+            # Only consider non-NaN labels
+            valid_mean = mean_pred[mask]
+            valid_log_var = log_var[mask]
+            valid_label = label[mask]
+
+            # Calculate loss using our custom loss function
+            if len(valid_label) > 0:
+                loss = criterion(valid_mean, valid_log_var, valid_label)
+            else:
+                loss = torch.tensor(0.0, device=mean_pred.device, requires_grad=True)
+        else:
+            # Original loss calculation for backward compatibility
+            if len(label[mask]) > 0:
+                loss = (pred[mask]-label[mask])**2
+                loss = torch.mean(loss)
+            else:
+                loss = torch.tensor(0.0, device=pred.device, requires_grad=True)
+
+        return loss
 
     def train_epoch(self, data_loader):
         self.model.train()
@@ -98,12 +130,12 @@ class SequenceModel():
             data.shape: (N, T, F)
             N - number of stocks
             T - length of lookback_window, 8
-            F - 158 factors + 63 market information + 1 label           
+            F - 158 factors + 63 market information + 1 label
             '''
             feature = data[:, :, 0:-1].to(self.device)
             label = data[:, -1, -1].to(self.device)
 
-            
+
             # Additional process on labels
             # If you use original data to train, you won't need the following lines because we already drop extreme when we dumped the data.
             # If you use the opensource data to train, use the following lines to drop extreme labels.
@@ -133,9 +165,9 @@ class SequenceModel():
             feature = data[:, :, 0:-1].to(self.device)
             label = data[:, -1, -1].to(self.device)
 
-            # You cannot drop extreme labels for test. 
+            # You cannot drop extreme labels for test.
             label = zscore(label)
-                        
+
             pred = self.model(feature.float())
             loss = self.loss_fn(pred, label)
             losses.append(loss.item())
@@ -158,17 +190,21 @@ class SequenceModel():
             train_loss = self.train_epoch(train_loader)
             self.fitted = step
             if dl_valid:
-                predictions, metrics = self.predict(dl_valid)
-                print("Epoch %d, train_loss %.6f, valid ic %.4f, icir %.3f, rankic %.4f, rankicir %.3f." % (step, train_loss, metrics['IC'],  metrics['ICIR'],  metrics['RIC'],  metrics['RICIR']))
-            else: print("Epoch %d, train_loss %.6f" % (step, train_loss))
-        
+                # Handle the case where predict returns 3 values (predictions, metrics, uncertainty)
+                result = self.predict(dl_valid)
+                if isinstance(result, tuple) and len(result) == 3:
+                    predictions, metrics, uncertainty = result
+                else:
+                    predictions, metrics = result
+                print("Epoch %d, train_loss %.6f, valid ic %.4f, icir %.3f, rankic %.4f, rankicir %.3f." %
+                     (step, train_loss, metrics['IC'], metrics['ICIR'], metrics['RIC'], metrics['RICIR']))
+            else:
+                print("Epoch %d, train_loss %.6f" % (step, train_loss))
+
             if train_loss <= self.train_stop_loss_thred:
                 best_param = copy.deepcopy(self.model.state_dict())
                 torch.save(best_param, f'{self.save_path}/{self.save_prefix}_{self.seed}.pkl')
                 break
-        
-
-        
 
     def predict(self, dl_test):
         if self.fitted<0:
@@ -179,6 +215,7 @@ class SequenceModel():
         test_loader = self._init_data_loader(dl_test, shuffle=False, drop_last=False)
 
         preds = []
+        uncertainties = []
         ic = []
         ric = []
 
@@ -187,12 +224,21 @@ class SequenceModel():
             data = torch.squeeze(data, dim=0)
             feature = data[:, :, 0:-1].to(self.device)
             label = data[:, -1, -1]
-            
+
             # nan label will be automatically ignored when compute metrics.
             # zscorenorm will not affect the results of ranking-based metrics.
 
             with torch.no_grad():
-                pred = self.model(feature.float()).detach().cpu().numpy()
+                model_output = self.model(feature.float())
+
+                # Check if model returns uncertainty
+                if isinstance(model_output, tuple) and len(model_output) == 2:
+                    pred, uncertainty = model_output
+                    pred = pred.detach().cpu().numpy()
+                    uncertainties.append(uncertainty.detach().cpu().numpy())
+                else:
+                    pred = model_output.detach().cpu().numpy()
+
             preds.append(pred.ravel())
 
             daily_ic, daily_ric = calc_ic(pred, label.detach().numpy())
@@ -201,6 +247,12 @@ class SequenceModel():
 
         predictions = pd.Series(np.concatenate(preds), index=dl_test.get_index())
 
+        # Store uncertainties if available
+        if uncertainties:
+            uncertainty_series = pd.Series(np.concatenate(uncertainties), index=dl_test.get_index())
+        else:
+            uncertainty_series = None
+
         metrics = {
             'IC': np.mean(ic),
             'ICIR': np.mean(ic)/np.std(ic),
@@ -208,4 +260,7 @@ class SequenceModel():
             'RICIR': np.mean(ric)/np.std(ric)
         }
 
-        return predictions, metrics
+        if uncertainty_series is not None:
+            return predictions, metrics, uncertainty_series
+        else:
+            return predictions, metrics
