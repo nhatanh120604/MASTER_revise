@@ -2,6 +2,7 @@ from master import MASTERModel
 import pickle
 import numpy as np
 import time
+import pandas as pd
 
 # Please install qlib first before load the data.
 
@@ -68,6 +69,18 @@ for seed in [0]:
     result = model.predict(dl_test)
     if isinstance(result, tuple) and len(result) == 3:
         predictions, metrics, uncertainty = result
+
+        # Add this to analyze uncertainty
+        print(f"Average prediction uncertainty: {uncertainty.mean():.4f}")
+        print(f"Uncertainty min: {uncertainty.min():.4f}, max: {uncertainty.max():.4f}")
+
+        # Optional: Save predictions with their uncertainty
+        combined_results = pd.DataFrame({
+            'prediction': predictions,
+            'uncertainty': uncertainty
+        })
+        combined_results.to_csv(f'results/{universe}_{prefix}_predictions_with_uncertainty.csv')
+
     else:
         predictions, metrics = result
 

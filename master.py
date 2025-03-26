@@ -160,6 +160,8 @@ class TemporalAttention(nn.Module):
     def __init__(self, d_model):
         super().__init__()
         self.trans = nn.Linear(d_model, d_model, bias=False)
+        # Add a transformation for uncertainty estimation
+        self.uncertainty_trans = nn.Linear(d_model, d_model, bias=False)
 
     def forward(self, z):
         h = self.trans(z) # [N, T, D]
@@ -167,7 +169,13 @@ class TemporalAttention(nn.Module):
         lam = torch.matmul(h, query).squeeze(-1)  # [N, T, D] --> [N, T]
         lam = torch.softmax(lam, dim=1).unsqueeze(1)
         output = torch.matmul(lam, z).squeeze(1)  # [N, 1, T], [N, T, D] --> [N, 1, D]
-        return output
+
+        # Use uncertainty_trans to generate uncertainty embedding
+        h_uncertainty = self.uncertainty_trans(z)  # [N, T, D]
+        # Apply same attention weights to uncertainty features
+        uncertainty_output = torch.matmul(lam, h_uncertainty).squeeze(1)  # [N, 1, D]
+
+        return output, uncertainty_output
 
 
 class MASTER(nn.Module):
@@ -179,27 +187,37 @@ class MASTER(nn.Module):
         self.d_gate_input = (gate_input_end_index - gate_input_start_index) # F'
         self.feature_gate = Gate(self.d_gate_input, d_feat, beta=beta)
 
-        self.layers = nn.Sequential(
-            # feature layer
-            nn.Linear(d_feat, d_model),
-            PositionalEncoding(d_model),
-            # intra-stock aggregation
-            TAttention(d_model=d_model, nhead=t_nhead, dropout=T_dropout_rate),
-            # inter-stock aggregation
-            SAttention(d_model=d_model, nhead=s_nhead, dropout=S_dropout_rate),
-            TemporalAttention(d_model=d_model),
-            # decoder
-            nn.Linear(d_model, 1)
-        )
+        # Replace Sequential with ModuleList to access intermediate outputs
+        self.feature_layer = nn.Linear(d_feat, d_model)
+        self.pos_encoding = PositionalEncoding(d_model)
+        self.intra_stock = TAttention(d_model=d_model, nhead=t_nhead, dropout=T_dropout_rate)
+        self.inter_stock = SAttention(d_model=d_model, nhead=s_nhead, dropout=S_dropout_rate)
+        self.temporal_attention = TemporalAttention(d_model=d_model)
+
+        # Separate decoders for mean and uncertainty
+        self.mean_decoder = nn.Linear(d_model, 1)
+        self.uncertainty_decoder = nn.Linear(d_model, 1)
 
     def forward(self, x):
         src = x[:, :, :self.gate_input_start_index] # N, T, D
         gate_input = x[:, -1, self.gate_input_start_index:self.gate_input_end_index]
         src = src * torch.unsqueeze(self.feature_gate(gate_input), dim=1)
-       
-        output = self.layers(src).squeeze(-1)
 
-        return output
+        # Pass through layers individually
+        out = self.feature_layer(src)
+        out = self.pos_encoding(out)
+        out = self.intra_stock(out)
+        out = self.inter_stock(out)
+
+        # Get both mean embedding and uncertainty from temporal attention
+        mean_embedding, uncertainty_embedding = self.temporal_attention(out)
+
+        # Decode mean and uncertainty
+        mean_pred = self.mean_decoder(mean_embedding).squeeze(-1)
+        log_var = self.uncertainty_decoder(uncertainty_embedding).squeeze(-1)
+
+        # Return both prediction and uncertainty
+        return mean_pred, log_var
 
 
 class MASTERModel(SequenceModel):
@@ -228,3 +246,25 @@ class MASTERModel(SequenceModel):
                                    gate_input_start_index=self.gate_input_start_index,
                                    gate_input_end_index=self.gate_input_end_index, beta=self.beta)
         super(MASTERModel, self).init_model()
+
+    def forward(self, x):
+        """
+        Override the forward method to handle uncertainty predictions
+        """
+        mean_pred, log_var = self.model(x)
+
+        if self.training:
+            return mean_pred, log_var
+        else:
+            # During inference, you might want to return mean and std
+            return mean_pred, torch.exp(0.5 * log_var)  # convert log_var to std
+
+    def predict_mean(self, x):
+        """
+        For compatibility with existing code that expects a single prediction.
+        This method is renamed from 'predict' to avoid conflict with parent class.
+        """
+        self.model.eval()
+        with torch.no_grad():
+            mean_pred, std = self.forward(x)
+            return mean_pred  # Return just the mean prediction for backward compatibility
